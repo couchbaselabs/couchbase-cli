@@ -68,7 +68,6 @@ server-add OPTIONS:
                                     server to be added
   --server-add-password=PASSWORD    admin password for the
                                     server to be added
-  --group-name=GROUPNAME            group that server belongs
 
 server-readd OPTIONS:
   --server-add=HOST[:PORT]          server to be added
@@ -76,7 +75,6 @@ server-readd OPTIONS:
                                     server to be added
   --server-add-password=PASSWORD    admin password for the
                                     server to be added
-  --group-name=GROUPNAME            group that server belongs
 
 group-manage OPTIONS:
   --group-name=GROUPNAME            group name
@@ -202,15 +200,13 @@ EXAMPLES:
     couchbase-cli server-add -c 192.168.0.1:8091 \\
        --server-add=192.168.0.2:8091 \\
        --server-add-username=Administrator \\
-       --server-add-password=password \\
-       --group-name=group1
+       --server-add-password=password
 
   Add a node to a cluster and rebalance:
     couchbase-cli rebalance -c 192.168.0.1:8091 \\
        --server-add=192.168.0.2:8091 \\
        --server-add-username=Administrator \\
-       --server-add-password=password \\
-       --group-name=group1
+       --server-add-password=password
 
   Remove a node from a cluster and rebalance:
     couchbase-cli rebalance -c 192.168.0.1:8091 \\
@@ -221,8 +217,7 @@ EXAMPLES:
       --server-remove=192.168.0.2 \\
       --server-add=192.168.0.4 \\
       --server-add-username=Administrator \\
-      --server-add-password=password \\
-      --group-name=group1
+      --server-add-password=password
 
   Stop the current rebalancing:
     couchbase-cli rebalance-stop -c 192.168.0.1:8091
@@ -364,13 +359,13 @@ EXAMPLES:
 
   Add a server to a group
     couchbase-cli group-manage -c 192.168.0.1:8091 \\
-        --add-servers=10.1.1.1;10.1.1.2:8091 \\
+        --add-servers="10.1.1.1:8091;10.1.1.2:8091" \\
         --group-name=group1 \\
         -u Administor -p password
 
   Move list of servers from group1 to group2
     couchbase-cli group-manage -c 192.168.0.1:8091 \\
-        --move-servers=10.1.1.1;10.1.1.2:8091 \\
+        --move-servers="10.1.1.1:8091;10.1.1.2:8091" \\
         --from-group=group1 \\
         --to-group=group2 \\
         -u Administor -p password
