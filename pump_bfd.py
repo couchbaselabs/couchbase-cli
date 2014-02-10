@@ -7,8 +7,10 @@ import os
 import simplejson as json
 import string
 import sys
+import datetime
 import time
 import urllib
+import fnmatch
 
 import couchbaseConstants
 import pump
@@ -44,16 +46,210 @@ class BFD:
             '/design.json'
 
     @staticmethod
-    def db_dir(spec, bucket_name, node_name):
-        return os.path.normpath(spec) + \
-            '/bucket-' + urllib.quote_plus(bucket_name) + \
-            '/node-' + urllib.quote_plus(node_name)
+    def construct_dir(parent, bucket_name, node_name):
+        return os.path.join(parent,
+                    "bucket-" + urllib.quote_plus(bucket_name),
+                    "node-" + urllib.quote_plus(node_name))
 
     @staticmethod
-    def db_path(spec, bucket_name, node_name, num):
-        return BFD.db_dir(spec, bucket_name, node_name) + \
-            "/data-%s.cbb" % (string.rjust(str(num), 4, '0'))
+    def check_full_dbfiles(parent_dir):
+        return glob.glob(os.path.join(parent_dir, "data-*.cbb"))
 
+    @staticmethod
+    def get_precessors(parent_dir):
+        json_file = open(os.path.join(parent_dir, "meta.json"), "r")
+        json_data = json.load(json_file)
+        json_file.close()
+        return json_data["pred"]
+
+    @staticmethod
+    def db_dir_v1(opts, spec, bucket_name, node_name, auto_create=False):
+        mode = getattr(opts, "mode", "auto")
+        parent_dir = os.path.normpath(spec)
+        tmstamp = time.strftime("%Y-%m-%d_%H_%M_%S", time.localtime())
+        if not mode:
+            mode = "auto"
+        if mode == "full":
+            if auto_create:
+                path = os.path.join(parent_dir, tmstamp + "-full")
+            else:
+                path = parent_dir
+            return BFD.construct_dir(path, bucket_name, node_name)
+        elif mode.find("incr-diff") >= 0 or mode == "auto":
+            path, dirs = BFD.find_latest_dir(parent_dir, "full")
+            if not path:
+                #change to a full backup
+                if auto_create:
+                    path = os.path.join(parent_dir, tmstamp + "-full")
+                    print "here:, create path:", path
+                else:
+                    path = os.path.join(parent_dir, tmstamp + "-full")
+                    #path = parent_dir
+                    print "here again:, path only:", path
+                    #raise Exception("where")
+                return BFD.construct_dir(path, bucket_name, node_name)
+            else:
+                subdir = BFD.construct_dir(path, bucket_name, node_name)
+                dbfiles = BFD.check_full_dbfiles(subdir)
+                if dbfiles:
+                    if auto_create:
+                        return os.path.join(subdir, tmstamp + "-diff")
+                else:
+                    return subdir
+        elif mode.find("incr-accu") >= 0:
+            path, dirs = BFD.find_latest_dir(parent_dir, "full")
+            if not path:
+                # change to a full backup
+                if auto_create:
+                    path = os.path.join(parent_dir, tmstamp + "-full")
+                else:
+                    path = parent_dir
+                return BFD.construct_dir(path, bucket_name, node_name)
+            else:
+                subdir = BFD.construct_dir(path, bucket_name, node_name)
+                dbfiles = BFD.check_full_dbfiles(subdir)
+                if dbfiles:
+                    if auto_create:
+                        return os.path.join(subdir, tmstamp + "-accu")
+                else:
+                    return subdir
+        else:
+            path = parent_dir
+
+        return BFD.construct_dir(path, bucket_name, node_name)
+
+    @staticmethod
+    def db_dir(opts, spec, bucket_name, node_name):
+        mode = getattr(opts, "mode", "auto")
+        tmstamp = time.strftime("%Y-%m-%d_%H_%M_%S", time.localtime())
+        parent_dir = os.path.normpath(spec)
+        timepath, dirs = BFD.find_latest_dir(parent_dir, None)
+        if not timepath or mode == "full":
+            # no any backup roots exists
+            path = os.path.join(parent_dir, tmstamp, tmstamp+"-full")
+            return BFD.construct_dir(path, bucket_name, node_name)
+
+        #check if any full backup exists
+        path, dirs = BFD.find_latest_dir(timepath, "full")
+        if not path:
+            path = os.path.join(timepath, tmstamp+"-full")
+            return BFD.construct_dir(path, bucket_name, node_name)
+
+        if mode.find("incr-diff") >= 0 or mode == "auto":
+            path = os.path.join(timepath, tmstamp+"-diff")
+            return BFD.construct_dir(path, bucket_name, node_name)
+        elif mode.find("incr-accu") >= 0:
+            path = os.path.join(timepath, tmstamp+"-accu")
+            return BFD.construct_dir(path, bucket_name, node_name)
+        else:
+            return parent_dir
+
+    @staticmethod
+    def find_latest_dir(parent_dir, mode):
+        all_subdirs = []
+        latest_dir = None
+        if not os.path.isdir(parent_dir):
+            return latest_dir, all_subdirs
+        for d in os.listdir(parent_dir):
+            #print d, parent_dir
+            if not mode or d.find(mode) >= 0:
+                bd = os.path.join(parent_dir, d)
+                if os.path.isdir(bd):
+                    all_subdirs.append(bd)
+        if all_subdirs:
+            latest_dir = max(all_subdirs, key=os.path.getmtime)
+        return latest_dir, all_subdirs
+
+    @staticmethod
+    def find_seqno_v1(opts, spec, bucket_name, node_name):
+        seqno = {}
+        for i in range(1024):
+            seqno[i] = 0
+ 
+        path = BFD.db_dir(opts, spec, bucket_name, node_name)
+        #raise Exception("ok")
+        file_list = BFD.check_full_dbfiles(path)
+        mode = getattr(opts, "mode", "auto")
+        if mode.find("incr-diff") >= 0 or mode == "auto":
+            latest,latest_dirs  = BFD.find_latest_dir(path, "diff")
+            if latest_dirs:
+                for dir in latest_dirs:
+                    file_list.extend(recursive_glob(dir, 'data-*.cbb'))
+        elif mode.find("incr-accu") >= 0:
+            latest,latest_dirs = BFD.find_latest_dir(path, "accu")
+            if latest_dirs:
+                for dir in latest_dirs:
+                    file_list.extend(recursive_glob(dir, 'data-*.cbb'))
+
+        for x in sorted(file_list):
+            rv, db = connect_db(x, opts, CBB_VERSION)
+            if rv != 0:
+                return rv, None
+
+            for i in range(1024):
+                cur = db.cursor()
+                cur.execute("SELECT MAX(seqno) FROM cbb_msg where vbucket_id = %s;" % i)
+                row = cur.fetchone()[0]
+                if row:
+                    if int(row) > seqno[i]:
+                        seqno[i] = int(row)
+                cur.close()
+            db.close()
+        #raise Exception("ok")
+        return seqno
+
+    @staticmethod
+    def find_seqno(opts, spec, bucket_name, node_name):
+        seqno = {}
+        dep = {}
+        dep_list = []
+        for i in range(1024):
+            seqno[i] = 0
+            dep[i] = None
+        file_list = []
+        parent_dir = os.path.normpath(spec)
+        mode = getattr(opts, "mode", "auto")
+        if mode == "full":
+            return seqno, dep_list
+        timedir,latest_dirs = BFD.find_latest_dir(parent_dir, None)
+        if not timedir:
+            return seqno, dep_list
+        fulldir, latest_dirs = BFD.find_latest_dir(timedir, "full")
+        if not fulldir:
+            return seqno, dep_list
+        file_list.extend(recursive_glob(fulldir, 'data-*.cbb'))
+        accudir, accu_dirs = BFD.find_latest_dir(timedir, "accu")
+        if accudir:
+            file_list.extend(recursive_glob(accudir, 'data-*.cbb'))
+        if mode.find("incr-diff") >= 0 or mode == "auto":
+            diffdir, diff_dirs = BFD.find_latest_dir(timedir, "diff")
+            if diff_dirs:
+                for dir in diff_dirs:
+                    file_list.extend(recursive_glob(dir, 'data-*.cbb'))
+
+
+        for x in sorted(file_list):
+            rv, db = connect_db(x, opts, CBB_VERSION)
+            if rv != 0:
+                return seqno, dep_list
+
+            for i in range(1024):
+                cur = db.cursor()
+                cur.execute("SELECT MAX(seqno) FROM cbb_msg where vbucket_id = %s;" % i)
+                row = cur.fetchone()[0]
+                if row:
+                    if int(row) > seqno[i]:
+                        seqno[i] = int(row)
+                        dep[i] = x 
+                cur.close()
+            db.close()
+        #for i in [464]:
+        #    print i, seqno[i]
+
+        for i in range(1024):
+            if dep[i] and dep[i] not in dep_list:
+                dep_list.append(dep[i])
+        return seqno, dep_list
 
 # --------------------------------------------------
 
@@ -70,8 +266,13 @@ class BFDSource(BFD, pump.Source):
 
     @staticmethod
     def can_handle(opts, spec):
-        return (os.path.isdir(spec) and
-                glob.glob(spec + "/bucket-*/node-*/data-*.cbb"))
+        if os.path.isdir(spec):
+            path, dirs = BFD.find_latest_dir(spec, None)
+            if path:
+                path, dirs = BFD.find_latest_dir(path, "full")
+                if path:
+                    return glob.glob(path + "*/bucket-*/node-*/data-*.cbb")
+        return False
 
     @staticmethod
     def check(opts, spec):
@@ -81,7 +282,11 @@ class BFDSource(BFD, pump.Source):
 
         buckets = []
 
-        bucket_dirs = glob.glob(spec + "/bucket-*")
+        path, dirs = BFD.find_latest_dir(spec, None)
+        if not path:
+            return "error: no backup directory found: " + spec, None
+        latest_dir, dir = BFD.find_latest_dir(path, "full")
+        bucket_dirs = glob.glob(latest_dir + "/bucket-*")
         for bucket_dir in sorted(bucket_dirs):
             if not os.path.isdir(bucket_dir):
                 return "error: not a bucket directory: " + bucket_dir, None
@@ -105,7 +310,6 @@ class BFDSource(BFD, pump.Source):
                     return "error: node_name too short: " + node_dir, None
 
                 bucket['nodes'].append({ 'hostname': node_name })
-
         return 0, { 'spec': spec,
                     'buckets': buckets }
 
@@ -124,6 +328,7 @@ class BFDSource(BFD, pump.Source):
         return 0, None
 
     def provide_batch(self):
+        #TBD: backward compatible with old backup file format
         if self.done:
             return 0, None
 
@@ -132,12 +337,28 @@ class BFDSource(BFD, pump.Source):
         batch_max_size = self.opts.extra['batch_max_size']
         batch_max_bytes = self.opts.extra['batch_max_bytes']
 
-        s = "SELECT cmd, vbucket_id, key, flg, exp, cas, meta, val FROM cbb_msg"
+        s = "SELECT cmd, vbucket_id, key, flg, exp, cas, meta, val, seqno FROM cbb_msg"
 
         if self.files is None: # None != [], as self.files will shrink to [].
-            g = glob.glob(BFD.db_dir(self.spec,
-                                     self.bucket_name(),
-                                     self.node_name()) + "/data-*.cbb")
+            rv, file_list = BFDSource.list_files(self.opts,
+                                                 self.spec, 
+                                                 self.bucket_name(),
+                                                 self.node_name(),
+                                                 "data-*.cbb")
+            if rv != 0:
+                return rv, None
+            from_date = getattr(self.opts, "from-date", None)
+            if from_date:
+                from_date = datetime.datetime.strptime(from_date, "%Y-%m-%d")
+              
+            to_date = getattr(self.opts, "to-date", None)
+            if to_date:
+                to_date = datetime.datetime.strptime(to_date, "%Y-%m-%d")
+            g = []
+            for f in file_list:
+                mtime = datetime.datetime.fromtimestamp(os.path.getmtime(f))
+                if (not from_date or mtime >= from_date) and (not to_date or mtime <= to_date):
+                    g.append(f)
             self.files = sorted(g)
         try:
             while (not self.done and
@@ -171,7 +392,7 @@ class BFDSource(BFD, pump.Source):
 
                     msg = (row[0], row[1], row[2], row[3], row[4],
                            int(row[5]), # CAS as 64-bit integer not string.
-                           row[6], row[7])
+                           row[6], row[7], row[8])
                     batch.append(msg, len(val))
                 else:
                     if self.cursor_db:
@@ -192,11 +413,15 @@ class BFDSource(BFD, pump.Source):
 
     @staticmethod
     def total_msgs(opts, source_bucket, source_node, source_map):
+        rv, file_list = BFDSource.list_files(opts,
+                                    source_map['spec'], 
+                                    source_bucket['name'],
+                                    source_node['hostname'],
+                                    "data-*.cbb")
+        if rv != 0:
+            return rv, None
         t = 0
-        g = glob.glob(BFD.db_dir(source_map['spec'],
-                                 source_bucket['name'],
-                                 source_node['hostname']) + "/data-*.cbb")
-        for x in sorted(g):
+        for x in sorted(file_list):
             rv, db = connect_db(x, opts, CBB_VERSION)
             if rv != 0:
                 return rv, None
@@ -210,6 +435,33 @@ class BFDSource(BFD, pump.Source):
 
         return 0, t
 
+    @staticmethod
+    def list_files(opts, spec, bucket, node, pattern):
+        file_list = []
+        prec_list = []
+        path, dirs = BFD.find_latest_dir(spec, None)
+        if not path:
+            return "error: No valid data in path:" % spec, None
+        path, dirs = BFD.find_latest_dir(path, None)
+        if not path:
+            return 0, file_list
+        latest_dir = BFD.construct_dir(path, bucket, node)
+        file_list.extend(glob.glob(os.path.join(latest_dir, pattern)))
+        for p in BFD.get_precessors(latest_dir):
+            prec_list.append(os.path.dirname(p))
+        while len(prec_list) > 0:
+            deps = glob.glob(os.path.join(prec_list[0], pattern))
+            for d in glob.glob(os.path.join(prec_list[0], pattern)):
+                if d not in file_list:
+                    file_list.append(d)
+            for p in BFD.get_precessors(prec_list[0]):
+                dirname = os.path.dirname(p)
+                if dirname not in prec_list:
+                    prec_list.append(dirname)
+            prec_list = prec_list[1:]
+        #for f in file_list:
+        #    print f
+        return 0, file_list
 
 # --------------------------------------------------
 
@@ -225,14 +477,15 @@ class BFDSink(BFD, pump.Sink):
     @staticmethod
     def run(self):
         """Worker thread to asynchronously store incoming batches into db."""
-        s = "INSERT INTO cbb_msg (cmd, vbucket_id, key, flg, exp, cas, meta, val)" \
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        s = "INSERT INTO cbb_msg (cmd, vbucket_id, key, flg, exp, cas, meta, val, seqno)" \
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         db = None
         cbb = 0       # Current cbb file NUM, like data-NUM.cbb.
         cbb_bytes = 0 # Current cbb msg value bytes total.
         cbb_max_bytes = \
             self.opts.extra.get("cbb_max_mb", 100000) * 1024 * 1024
 
+        seqno, dep = BFD.find_seqno(self.opts, self.spec, self.source_bucket, self.source_node)
         while not self.ctl['stop']:
             batch, future = self.pull_next_batch()
             if not batch:
@@ -245,30 +498,35 @@ class BFDSink(BFD, pump.Sink):
                 cbb_bytes = 0
 
             if not db:
-                rv, db = self.create_db(cbb)
+                rv, db, meta_file = self.create_db(cbb)
                 if rv != 0:
                     return self.future_done(future, rv)
-
+                #todo: write dep to meta_file
+                json_file = open(meta_file, "w")
+                json.dump({'pred': dep}, json_file, ensure_ascii=False)
+                json_file.close()
             try:
                 c = db.cursor()
 
                 for msg in batch.msgs:
-                    cmd, vbucket_id, key, flg, exp, cas, meta, val = msg
-
+                    cmd, vbucket_id, key, flg, exp, cas, meta, val, seqno = msg
+                    if vbucket_id == 464:
+                        print  cmd, vbucket_id, key, flg, exp, cas, meta, val, seqno
                     if self.skip(key, vbucket_id):
                         continue
-
-                    if (cmd != couchbaseConstants.CMD_TAP_MUTATION and
-                        cmd != couchbaseConstants.CMD_TAP_DELETE):
+                    if cmd not in [couchbaseConstants.CMD_TAP_MUTATION, \
+                                   couchbaseConstants.CMD_TAP_DELETE, \
+                                   couchbaseConstants.CMD_UPR_MUTATION, 
+                                   couchbaseConstants.CMD_UPR_DELETION]:
                         return self.future_done(future,
                                                 "error: BFDSink bad cmd: " +
                                                 str(cmd))
-
                     c.execute(s, (cmd, vbucket_id,
                                   sqlite3.Binary(key),
                                   flg, exp, str(cas),
-                                  sqlite3.Binary(meta),
-                                  sqlite3.Binary(val)))
+                                  sqlite3.Binary(str(meta)),
+                                  sqlite3.Binary(val),
+                                  seqno))
                     cbb_bytes += len(val)
 
                 db.commit()
@@ -277,14 +535,22 @@ class BFDSink(BFD, pump.Sink):
 
             except sqlite3.Error, e:
                 return self.future_done(future, "error: db error: " + str(e))
-            except Exception, e:
-                return self.future_done(future, "error: db exception: " + str(e))
+            #except Exception, e:
+            #    return self.future_done(future, "a error: db exception: " + str(e))
 
     @staticmethod
     def can_handle(opts, spec):
         spec = os.path.normpath(spec)
         return (os.path.isdir(spec) or (not os.path.exists(spec) and
                                         os.path.isdir(os.path.dirname(spec))))
+
+    @staticmethod
+    def check_spec(source_bucket, source_node, opts, spec, ctl):
+        pump.Sink.check_spec(source_bucket, source_node, opts, spec, ctl)
+
+        seqno, dep = BFD.find_seqno(opts, spec, source_bucket['name'], source_node['hostname'])
+        if seqno:
+            ctl['seqno'] = seqno
 
     @staticmethod
     def check(opts, spec, source_map):
@@ -300,7 +566,8 @@ class BFDSink(BFD, pump.Sink):
             if not os.access(spec, os.W_OK):
                 return "error: backup directory is not writable: " + spec, None
             if len(os.listdir(spec)):
-                return "error: backup directory is not empty: " + spec, None
+                if getattr(opts, "full", False):
+                    return "error: backup directory is not empty: " + spec, None
             return 0, None
 
         # Or, that the parent directory exists.
@@ -336,14 +603,12 @@ class BFDSink(BFD, pump.Sink):
         return self.push_next_batch(batch, pump.SinkBatchFuture(self, batch))
 
     def create_db(self, num):
-        rv = self.mkdirs()
+        rv, dir = self.mkdirs()
         if rv != 0:
             return rv, None
 
-        rv, db = create_db(BFD.db_path(self.spec,
-                                       self.bucket_name(),
-                                       self.node_name(), num),
-                           self.opts)
+        path = dir + "/data-%s.cbb" % (string.rjust(str(num), 4, '0'))
+        rv, db = create_db(path, self.opts)
         if rv != 0:
             return rv, None
 
@@ -362,19 +627,27 @@ class BFDSink(BFD, pump.Sink):
                         ("start.datetime", time.strftime("%Y/%m/%d-%H:%M:%S")))
             db.commit()
         except sqlite3.Error, e:
-            return "error: create_db error: " + str(e), None
+            return "error: create_db error: " + str(e), None, None
         except Exception, e:
-            return "error: create_db exception: " + str(e), None
+            return "b error: create_db exception: " + str(e), None, None
 
-        return 0, db
+        return 0, db, dir + "/meta.json"
 
     def mkdirs(self):
         """Make directories, if not already, with structure like...
            <spec>/
-             bucket-<BUCKETNAME>/
-               design.json
-               node-<NODE>/
-                 data-<XXXX>.cbb"""
+             yyyy-mm-dd_hh_mm_ss/
+                yyyy-mm-dd_hh_mm_ss-full /
+                   bucket-<BUCKETNAME>/
+                     design.json
+                     node-<NODE>/
+                       data-<XXXX>.cbb
+                yyyy-mm-dd_hh_mm_ss-diff/
+                   bucket-<BUCKETNAME>/
+                     design.json
+                     node-<NODE>/
+                       data-<XXXX>.cbb
+                   """
         spec = os.path.normpath(self.spec)
         if not os.path.isdir(spec):
             try:
@@ -382,13 +655,13 @@ class BFDSink(BFD, pump.Sink):
             except OSError, e:
                 return "error: could not mkdir: %s; exception: %s" % (spec, e)
 
-        d = BFD.db_dir(self.spec, self.bucket_name(), self.node_name())
+        d = BFD.db_dir(self.opts, self.spec, self.bucket_name(), self.node_name())
         if not os.path.isdir(d):
             try:
                 os.makedirs(d)
             except OSError, e:
-                return "error: could not mkdirs: %s; exception: %s" % (d, e)
-        return 0
+                return "error: could not mkdirs: %s; exception: %s" % (d, e), None
+        return 0, d
 
 
 # --------------------------------------------------
@@ -396,7 +669,6 @@ class BFDSink(BFD, pump.Sink):
 def create_db(db_path, opts):
     try:
         logging.debug("  create_db: " + db_path)
-
         rv, db = connect_db(db_path, opts, 0)
         if rv != 0:
             return rv, None
@@ -409,7 +681,7 @@ def create_db(db_path, opts):
                      (cmd integer,
                       vbucket_id integer,
                       key blob, flg integer, exp integer, cas text,
-                      meta blob, val blob);
+                      meta blob, val blob, seqno integer);
                   CREATE TABLE cbb_meta
                      (key text,
                       val blob);
@@ -418,9 +690,8 @@ def create_db(db_path, opts):
                 """ % (CBB_VERSION))
 
         return 0, db
-
     except Exception, e:
-        return "error: create_db exception: " + str(e), None
+        return "c error: create_db exception: " + str(e), None
 
 def connect_db(db_path, opts, version):
     try:
@@ -435,6 +706,7 @@ def connect_db(db_path, opts, version):
 
         cur = db.execute("pragma user_version").fetchall()[0][0]
         if cur != version:
+            raise Exception("unexpected db user version")
             return "error: unexpected db user version: " + \
                 str(cur) + " vs " + str(version), \
                 None
@@ -442,7 +714,7 @@ def connect_db(db_path, opts, version):
         return 0, db
 
     except Exception, e:
-        return "error: connect_db exception: " + str(e), None
+        return "d error: connect_db exception: " + str(e), None
 
 def cleanse(d):
     """Elide passwords from hierarchy of dict/list's."""
@@ -460,3 +732,9 @@ def cleanse_helper(d):
             else:
                 d[k] = cleanse_helper(v)
     return d
+
+def recursive_glob(rootdir='.', pattern='*'):
+    return [os.path.join(rootdir, filename)
+            for rootdir, dirnames, filenames in os.walk(rootdir)
+            for filename in filenames
+            if fnmatch.fnmatch(filename, pattern)]

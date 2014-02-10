@@ -137,7 +137,7 @@ class MCSink(pump.Sink):
         m = []
 
         for i, msg in enumerate(msgs):
-            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val = msg
+            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val, seqno = msg
             if vbucket_id is not None:
                 vbucket_id_msg = vbucket_id
 
@@ -175,7 +175,7 @@ class MCSink(pump.Sink):
         retry = False
 
         for i, msg in enumerate(msgs):
-            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val = msg
+            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val, seqno = msg
             if vbucket_id is not None:
                 vbucket_id_msg = vbucket_id
 
@@ -242,13 +242,13 @@ class MCSink(pump.Sink):
             # The source gave no meta, so use regular commands.
             self.op_map = OP_MAP
 
-        if cmd == couchbaseConstants.CMD_TAP_MUTATION:
+        if cmd in[couchbaseConstants.CMD_TAP_MUTATION, couchbaseConstants.CMD_UPR_MUTATION] :
             m = self.op_map.get(op, None)
             if m:
                 return 0, m
             return "error: MCSink.translate_cmd, unsupported op: " + op, None
 
-        if cmd == couchbaseConstants.CMD_TAP_DELETE:
+        if cmd in [couchbaseConstants.CMD_TAP_DELETE, couchbaseConstants.CMD_UPR_DELETION]:
             if op == 'get':
                 return 0, couchbaseConstants.CMD_NOOP
             return 0, self.op_map['delete']
