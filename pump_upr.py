@@ -122,7 +122,7 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
             while (not self.upr_done and
                    batch.size() < batch_max_size and
                    batch.bytes < batch_max_bytes):
-                 
+
                 #if not self.queue.empty():
                 #    vbid, cmd, start_seqno, end_seqno, vb_uuid, hi_seqno = self.queue.get()
                 #    self.request_upr_stream(vbid, 0, start_seqno, end_seqno, vb_uuid, hi_seqno)
@@ -133,19 +133,18 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
                     else:
                         self.upr_done = True
                     continue
-                cmd, errcode, opaque, cas, keylen, extlen, data, datalen = \
+                cmd, errcode, opaque, cas, keylen, extlen, data, datalen, dtype = \
                     self.response.get()
                 #self.recv_upr_msg(self.upr_conn.s)
                 #print cmd, errcode, opaque, cas, keylen, extlen, data
                 #assert opaque == int(vbid), "expected opaque '%s', got '%s'" % (vbid, opaque)
                 rv = 0
-                metalen = flags = ttl = flg = exp = 0
-                meta = key = val = ext = ''
+                metalen = flags = flg = exp = 0
+                key = val = ext = ''
                 need_ack = False
                 seqno = 0
                 if cmd == couchbaseConstants.CMD_UPR_REQUEST_STREAM:
                     if errcode == couchbaseConstants.ERR_SUCCESS:
-                        #self.stream_list.remove(opaque)
                         start = 0
                         step = UPRStreamSource.HIGH_SEQNO_BYTE + UPRStreamSource.UUID_BYTE
                         #while start+step <= datalen:
@@ -165,7 +164,8 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
                         logging.warn("Vbucket is not active anymore, skip it:%s" % vbid)
                         del self.stream_list[opaque]
                     elif errcode == couchbaseConstants.ERR_ERANGE:
-                        #logging.warn("Start and end sequence numbers are specified incorrectly,(%s, %s)" % (start_seqno, end_seqno))
+                        #logging.warn("Start and end sequence numbers are specified incorrectly,(%s, %s)" % \
+                        #             (start_seqno, end_seqno))
                         del self.stream_list[opaque]
                     elif errcode == couchbaseConstants.ERR_ROLLBACK:
                         vbid, flags, start_seqno, end_seqno, vb_uuid, hi_seqno = self.stream_list[opaque]
@@ -177,28 +177,27 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
                         self.stream_list[opaque] = (vbid, flags, start_seqno, end_seqno, vb_uuid, hi_seqno)
                 elif cmd == couchbaseConstants.CMD_UPR_MUTATION:
                     vbucket_id = errcode
-                    seqno, rev_seqno, flg, exp, locktime, meta, nru = \
+                    seqno, rev_seqno, flg, exp, locktime, metalen, nru = \
                         struct.unpack(couchbaseConstants.UPR_MUTATION_PKT_FMT, data[0:extlen])
                     key_start = extlen
                     val_start = key_start + keylen
                     key = data[extlen:val_start]
                     val = data[val_start:]
                     if not self.skip(key, vbucket_id):
-                        msg = (cmd, vbucket_id, key, flg, exp, cas, meta, val, seqno)
+                        msg = (cmd, vbucket_id, key, flg, exp, cas, rev_seqno, val, seqno, dtype, metalen)
                         #print msg
                         batch.append(msg, len(val))
                         self.num_msg += 1
                 elif cmd == couchbaseConstants.CMD_UPR_DELETION or \
                      cmd == couchbaseConstants.CMD_UPR_EXPIRATION:
                     vbucket_id = errcode
-                    seqno, rev_seqno, meta = \
+                    seqno, rev_seqno, metalen = \
                         struct.unpack(couchbaseConstants.UPR_DELETE_PKT_FMT, data[0:extlen])
                     key_start = extlen
                     val_start = key_start + keylen
                     key = data[extlen:val_start]
                     if not self.skip(key, vbucket_id):
-                        msg = (cmd, vbucket_id, key, flg, exp, cas, meta, val, seqno)
-                        #print msg
+                        msg = (cmd, vbucket_id, key, flg, exp, cas, rev_seqno, val, seqno, dtype, metalen)
                         batch.append(msg, len(val))
                         self.num_msg += 1
                     if cmd == couchbaseConstants.CMD_UPR_DELETE:
@@ -329,7 +328,7 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
                 bytes_read += data
 
             while len(bytes_read) >= couchbaseConstants.MIN_RECV_PACKET:
-                magic, opcode, keylen, extlen, dt, status, bodylen, opaque, cas=\
+                magic, opcode, keylen, extlen, datatype, status, bodylen, opaque, cas=\
                     struct.unpack(couchbaseConstants.RES_PKT_FMT, bytes_read[0:couchbaseConstants.MIN_RECV_PACKET])
 
                 if len(bytes_read) < (couchbaseConstants.MIN_RECV_PACKET+bodylen):
@@ -339,14 +338,14 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
                 body = bytes_read[couchbaseConstants.MIN_RECV_PACKET:couchbaseConstants.MIN_RECV_PACKET+bodylen]
                 bytes_read = bytes_read[couchbaseConstants.MIN_RECV_PACKET+bodylen:]
 
-                self.response.put((opcode, status, opaque, cas, keylen, extlen, body, bodylen))
+                self.response.put((opcode, status, opaque, cas, keylen, extlen, body, bodylen, datatype))
 
     def setup_upr_streams(self):
         #send request to retrieve vblist and uuid for the node
         stats = self.mem_conn.stats("vbucket-seqno")
         if not stats:
             return "error: fail to retrive vbucket seqno", None
-        self.mem_conn.close()   
+        self.mem_conn.close()
 
         uuid_list = {}
         seqno_list = {}
@@ -375,22 +374,22 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
             #    print vbid, start_seqno, vb_list[vbid][UPRStreamSource.HIGH_SEQNO]
             #print vbid, start_seqno
             self.request_upr_stream(int(vbid), flags, start_seqno+1,
-                                    vb_list[vbid][UPRStreamSource.HIGH_SEQNO], 
+                                    vb_list[vbid][UPRStreamSource.HIGH_SEQNO],
                                     vb_list[vbid][UPRStreamSource.VB_UUID], 0)
 
     def request_upr_stream(self, vbid, flags, start_seqno, end_seqno, vb_uuid, hi_seqno):
         if not self.upr_conn:
             return "error: no upr connection setup yet.", None
-        extra = struct.pack(couchbaseConstants.UPR_STREAM_REQ_PKT_FMT, 
-                            int(flags), 0, 
-                            int(start_seqno), 
-                            int(end_seqno), 
-                            int(vb_uuid), 
+        extra = struct.pack(couchbaseConstants.UPR_STREAM_REQ_PKT_FMT,
+                            int(flags), 0,
+                            int(start_seqno),
+                            int(end_seqno),
+                            int(vb_uuid),
                             int(hi_seqno))
         self.upr_conn._sendMsg(couchbaseConstants.CMD_UPR_REQUEST_STREAM, '', '', vbid, extra, 0, 0, vbid)
         self.stream_list[vbid] = (vbid, flags, start_seqno, end_seqno, vb_uuid, hi_seqno)
 
-    def read_upr_conn(self, upr_conn):
+    def _read_upr_conn(self, upr_conn):
         buf, cmd, errcode, opaque, cas, keylen, extlen, data, datalen = \
             self.recv_upr_msg(upr_conn.s)
         upr_conn.buf = buf
@@ -423,7 +422,7 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
 
         return rv, cmd, errcode, key, flg, exp, cas, meta, val, opaque, need_ack, seqno
 
-    def recv_upr_msg_error(self, sock, buf):
+    def _recv_upr_msg_error(self, sock, buf):
         pkt, buf = self.recv_upr(sock, couchbaseConstants.MIN_RECV_PACKET, buf)
         if not pkt:
             raise EOFError()
@@ -435,7 +434,7 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
         data, buf = self.recv_upr(sock, datalen, buf)
         return buf, cmd, errcode, opaque, cas, keylen, extlen, data, datalen
 
-    def recv_upr_msg(self, sock):
+    def _recv_upr_msg(self, sock):
         response = ""
         while len(response) < couchbaseConstants.MIN_RECV_PACKET:
             data = sock.recv(couchbaseConstants.MIN_RECV_PACKET - len(response))
@@ -458,7 +457,7 @@ class UPRStreamSource(pump_tap.TAPDumpSource, threading.Thread):
         assert (magic in (couchbaseConstants.RES_MAGIC_BYTE, couchbaseConstants.REQ_MAGIC_BYTE)), "Got magic: %d" % magic
         return cmd, errcode, opaque, cas, keylen, extralen, rv, datalen
 
-    def recv_upr(self, skt, nbytes, buf):
+    def _recv_upr(self, skt, nbytes, buf):
         recv_arr = [ buf ]
         recv_tot = len(buf) # In bytes.
 
@@ -666,7 +665,7 @@ class UPRSink(pump_cb.CBSink):
         m = []
         #Ask for acknowledgement for the last msg of batch
         for i, msg in enumerate(msgs):
-            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val, seqno = msg
+            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val, seqno, dtype, nmeta = msg
             if vbucket_id is not None:
                 vbucket_id_msg = vbucket_id
 
@@ -680,7 +679,7 @@ class UPRSink(pump_cb.CBSink):
             need_ack = (i == len(msgs)-1)
             rv, req = self.cmd_request(cmd, vbucket_id_msg, key, val,
                                        ctypes.c_uint32(flg).value,
-                                       exp, cas, meta, i, seqno, need_ack)
+                                       exp, cas, meta, i, seqno, dtype, nmeta, need_ack)
             if rv != 0:
                 return rv
             self.append_req(m, req)
@@ -691,7 +690,7 @@ class UPRSink(pump_cb.CBSink):
                 return "error: conn.send() exception: %s" % (e)
         return 0
 
-    def cmd_request(self, cmd, vbucket_id, key, val, flg, exp, cas, meta, opaque, seqno, need_ack):
+    def cmd_request(self, cmd, vbucket_id, key, val, flg, exp, cas, meta, opaque, seqno, dtype, nmeta, need_ack):
         if meta:
             seq_no = str(meta)
             if len(seq_no) > 8:
@@ -717,7 +716,7 @@ class UPRSink(pump_cb.CBSink):
         else:
             return "error: MCSink - unknown tap cmd for request: " + str(cmd), None
 
-        hdr = self.cmd_header(cmd, vbucket_id, key, val, ext, cas, opaque, metalen)
+        hdr = self.cmd_header(cmd, vbucket_id, key, val, ext, cas, opaque, metalen, dtype)
         return 0, (hdr, ext, seq_no, key, val)
 
     def cmd_header(self, cmd, vbucket_id, key, val, ext, cas, opaque, metalen,

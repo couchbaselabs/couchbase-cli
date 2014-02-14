@@ -108,6 +108,7 @@ class TAPDumpSource(pump.Source):
         cur_sleep = 0.2
         cur_retry = 0
         max_retry = self.opts.extra['max_retry']
+
         while True:
             if self.tap_done:
                 return 0, None
@@ -155,7 +156,7 @@ class TAPDumpSource(pump.Source):
                 if (cmd == couchbaseConstants.CMD_TAP_MUTATION or
                     cmd == couchbaseConstants.CMD_TAP_DELETE):
                     if not self.skip(key, vbucket_id):
-                        msg = (cmd, vbucket_id, key, flg, exp, cas, meta, val, 0)
+                        msg = (cmd, vbucket_id, key, flg, exp, cas, meta, val, 0, 0, 0)
                         batch.append(msg, len(val))
                         self.num_msg += 1
                     if cmd == couchbaseConstants.CMD_TAP_DELETE:
@@ -514,7 +515,7 @@ class TapSink(pump_cb.CBSink):
         m = []
         #Ask for acknowledgement for the last msg of batch
         for i, msg in enumerate(msgs):
-            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val = msg
+            cmd, vbucket_id_msg, key, flg, exp, cas, meta, val = msg[:8]
             if vbucket_id is not None:
                 vbucket_id_msg = vbucket_id
 

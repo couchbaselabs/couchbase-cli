@@ -177,7 +177,7 @@ from a source cluster into the caching layer at the destination""")
 
     def opt_extra_defaults(self):
         return {
-            "batch_max_size":  (10000,   "Transfer this # of documents per batch"),
+            "batch_max_size":  (1000,   "Transfer this # of documents per batch"),
             "batch_max_bytes": (400000, "Transfer this # of bytes per batch"),
             "cbb_max_mb":      (100000, "Split backup file on destination cluster if it exceeds MB"),
             "max_retry":       (10,     "Max number of sequential retries if transfer fails"),
@@ -222,9 +222,9 @@ class Backup(Transfer):
                              not all server nodes from the entire cluster;
                              this single server node is defined by the source URL""")
         p.add_option("-m", "--mode",
-                    action="store", type="string", default="auto",
-                    help="backup mode: full, incr-diff, incr-accu, "
-                         "or auto [default:%default]")
+                    action="store", type="string", default="diff",
+                    help="backup mode: full, diff or accu [default:%default]")
+
         Transfer.opt_parser_options_common(self, p)
 
     def find_handlers(self, opts, source, sink):
